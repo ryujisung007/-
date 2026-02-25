@@ -88,7 +88,7 @@ def main():
     st.sidebar.download_button(label="현재 DB 다운로드", data=csv_bytes, file_name="food_trend_database.csv", mime="text/csv")
 
     # 메인 화면
-    st.title("🥤 BRK LAB: 신제품 개발 시뮬레이터")
+    st.title("🥤식품정보원 LAB: 신제품 개발 시뮬레이터")
     
     tab1, tab2 = st.tabs(["📊 통합 트렌드 DB", "🧪 레시피 시뮬레이터"])
 
