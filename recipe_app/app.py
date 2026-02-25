@@ -3,7 +3,12 @@
 """
 import streamlit as st
 import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
+
+# Streamlit Cloud 호환 경로 설정
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
 from data.common import *
 
 st.set_page_config(page_title="Food R&D Platform", page_icon="🧪", layout="wide")
