@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import time
-import urllib.parse
+# urllib 불필요 — API에 한글 직접 전달
 
 # ━━━ 페이지 설정 ━━━
 st.set_page_config(
@@ -52,36 +52,75 @@ FOOD_TYPES = {
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_food_data(food_type, start=1, end=100):
     """식품안전나라 I1250 API 호출 (서버사이드 필터링)"""
-    encoded_type = urllib.parse.quote(food_type)
-    url = f"{BASE_URL}/{start}/{end}/PRDLST_DCNM={encoded_type}"
 
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+    # 방법 1: 서버사이드 필터링 시도 (PRDLST_DCNM 파라미터)
+    url_filtered = f"{BASE_URL}/{start}/{end}/PRDLST_DCNM={food_type}"
 
-        if SERVICE_ID not in data:
-            return None, "API 응답에 데이터가 없습니다.", 0
+    # 방법 2: 전체 조회 후 클라이언트 필터링 (fallback)
+    url_all = f"{BASE_URL}/{start}/{end}"
 
-        result = data[SERVICE_ID]
-        code = result.get("RESULT", {}).get("CODE", "")
-        msg = result.get("RESULT", {}).get("MSG", "")
+    for attempt, (url, is_filtered) in enumerate([
+        (url_filtered, True),
+        (url_all, False),
+    ]):
+        try:
+            # requests에 한글 인코딩 맡기지 않고 직접 바이트로 전송
+            if is_filtered:
+                response = requests.get(
+                    url,
+                    timeout=30,
+                    headers={"Accept": "application/json"}
+                )
+            else:
+                response = requests.get(url, timeout=30)
 
-        if code == "INFO-200":
-            return [], "해당 식품유형의 데이터가 없습니다.", 0
-        elif code != "INFO-000":
-            return None, f"[{code}] {msg}", 0
+            response.raise_for_status()
+            data = response.json()
 
-        total = int(result.get("total_count", 0))
-        rows = result.get("row", [])
-        return rows, "정상", total
+            if SERVICE_ID not in data:
+                if is_filtered:
+                    continue  # fallback으로 재시도
+                return None, "API 응답에 데이터가 없습니다.", 0
 
-    except requests.exceptions.Timeout:
-        return None, "API 응답 시간 초과 (30초)", 0
-    except requests.exceptions.ConnectionError:
-        return None, "API 서버 연결 실패", 0
-    except Exception as e:
-        return None, f"오류: {str(e)}", 0
+            result = data[SERVICE_ID]
+            code = result.get("RESULT", {}).get("CODE", "")
+            msg = result.get("RESULT", {}).get("MSG", "")
+
+            if code == "ERROR-500" and is_filtered:
+                continue  # 서버사이드 필터링 실패 → fallback
+
+            if code == "INFO-200":
+                if is_filtered:
+                    continue  # 데이터 없으면 fallback 시도
+                return [], "해당 식품유형의 데이터가 없습니다.", 0
+            elif code != "INFO-000":
+                if is_filtered:
+                    continue
+                return None, f"[{code}] {msg}", 0
+
+            total = int(result.get("total_count", 0))
+            rows = result.get("row", [])
+
+            # fallback인 경우 클라이언트측 필터링
+            if not is_filtered and rows:
+                filtered = [r for r in rows if r.get("PRDLST_DCNM", "")
+                           and food_type in r.get("PRDLST_DCNM", "")]
+                return filtered, "정상 (클라이언트 필터링)", total
+            else:
+                return rows, "정상", total
+
+        except requests.exceptions.Timeout:
+            if is_filtered:
+                continue
+            return None, "API 응답 시간 초과 (30초)", 0
+        except requests.exceptions.ConnectionError:
+            return None, "API 서버 연결 실패", 0
+        except Exception as e:
+            if is_filtered:
+                continue
+            return None, f"오류: {str(e)}", 0
+
+    return None, "모든 조회 방법 실패", 0
 
 
 def fetch_multiple_types(types_list, per_type=20):
@@ -92,11 +131,14 @@ def fetch_multiple_types(types_list, per_type=20):
 
     for i, ft in enumerate(types_list):
         progress.progress((i + 1) / len(types_list), text=f"📡 {ft} 조회 중...")
-        rows, msg, total = fetch_food_data(ft, 1, per_type)
+        # fallback 대비 넉넉하게 요청 (서버필터링 실패 시 클라이언트 필터링)
+        rows, msg, total = fetch_food_data(ft, 1, min(per_type * 5, 1000))
+        if rows:
+            rows = rows[:per_type]  # 요청 건수만큼만
         status_msgs[ft] = {"msg": msg, "total": total, "fetched": len(rows) if rows else 0}
         if rows:
             all_rows.extend(rows)
-        time.sleep(0.3)  # API 부하 방지
+        time.sleep(0.5)  # API 부하 방지
 
     progress.empty()
     return all_rows, status_msgs
@@ -205,13 +247,19 @@ if run:
     # ━━━ 단일 유형 조회 ━━━
     if mode == "📋 단일 유형 조회":
         with st.spinner(f"📡 '{food_type}' 데이터 조회 중..."):
-            rows, msg, total = fetch_food_data(food_type, 1, count)
+            # fallback(클라이언트 필터링) 대비 넉넉하게 요청
+            request_count = min(count * 5, 1000)
+            rows, msg, total = fetch_food_data(food_type, 1, request_count)
+            if rows and len(rows) > count:
+                rows = rows[:count]
 
         if rows is None:
             st.error(f"❌ 조회 실패: {msg}")
         elif len(rows) == 0:
             st.warning(f"⚠️ '{food_type}'에 해당하는 데이터가 없습니다.")
         else:
+            if "클라이언트" in msg:
+                st.info(f"ℹ️ 서버 필터링 불가 → 전체 데이터에서 '{food_type}' 추출 ({len(rows)}건)")
             df = to_dataframe(rows)
 
             # ━━ 상단 메트릭 ━━
